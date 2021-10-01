@@ -251,6 +251,33 @@ def create_train_val_set(root, validation_proportion=0.1, avalanche=True):
         return train_sets, val_sets
 
 
+def create_train_val_set_small(root, validation_proportion=0.1, avalanche=True):
+    splits = ['train', 'val', 'val', 'val']
+    task_dicts = [{'city': 'Shanghai', 'location': 'Citystreet', 'period': 'Daytime', 'weather': 'Clear'},
+                  {'location': 'Highway', 'period': 'Daytime', 'weather': ['Clear', 'Overcast']},
+                  {'period': 'Night'},
+                  {'period': 'Daytime', 'weather': 'Rainy'}]
+
+    match_fns = [haitain.create_match_fn_from_dict(td) for td in task_dicts]
+    train_sets = [haitain.get_matching_set(root, split, match_fn, haitain.get_transform(True)) for
+                  match_fn, split in zip(match_fns, splits)]
+    val_sets = []
+    for iid,ts in zip( [2,3,5,7], train_sets):
+        # cut_off = int(validation_proportion * len(ts))
+        cut_off = 30
+        all_samples = ts.samples
+        ts.samples = all_samples[:cut_off]
+        val_samples = all_samples[cut_off:cut_off*2]
+        val_sets.append(haitain.HaitainDetectionSet(ts.root, val_samples, ts.annotation_file,
+                                                    haitain.get_transform(False), ts.meta))
+
+    if avalanche:
+        return [AvalancheDataset(train_set) for train_set in train_sets], \
+               [AvalancheDataset(val_set) for val_set in val_sets]
+    else:
+        return train_sets, val_sets
+
+
 def create_test_set_from_json(root, avalanche=True):
     with open('./test_image_ids.json', 'r') as f:
         task_ids = json.load(f)

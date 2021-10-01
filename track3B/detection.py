@@ -1,14 +1,49 @@
+import os
 import re
 import argparse
+import sys
+
+import ipdb
 import torchvision.models
 from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
 
 from avalanche.benchmarks.scenarios.generic_benchmark_creation import create_multi_dataset_generic_benchmark
 from avalanche.logging import TextLogger
 from avalanche.training.plugins.lr_scheduling import LRSchedulerPlugin
+from avalanche.training.plugins import ReplayPlugin
 
+import torch
 from detection_util import *
 from detection_strategy import *
+
+from avalanche.models import SimpleMLP
+from avalanche.training.strategies import Naive
+from avalanche.training.plugins import ReplayPlugin
+from avalanche.evaluation.metrics import forgetting_metrics, accuracy_metrics, loss_metrics
+from avalanche.logging import InteractiveLogger
+from avalanche.training.plugins import EvaluationPlugin
+
+from torchvision.models.detection.transform import GeneralizedRCNNTransform
+# Flexible integration for any Python script
+import wandb
+
+def increase_minsize(model):
+    image_mean = [0.485, 0.456, 0.406]
+    image_std = [0.229, 0.224, 0.225]
+    min_size = 1280
+    max_size = 1920
+    model.transform = GeneralizedRCNNTransform(min_size, max_size, image_mean, image_std)
+    return model
+
+
+def warmup_lr_scheduler(optimizer, warmup_iters, warmup_factor):
+    def f(x):
+        if x >= warmup_iters:
+            return 1
+        alpha = float(x) / warmup_iters
+        return warmup_factor * (1 - alpha) + alpha
+
+    return torch.optim.lr_scheduler.LambdaLR(optimizer, f)
 
 
 def main():
@@ -29,6 +64,7 @@ def main():
     parser.add_argument('--load_model', type=str, default=None,
                         help='Loads model with given name. Model should be stored in current folder')
     parser.add_argument('--test_only', action='store_true')
+    parser.add_argument('--fake', action='store_true', help="simulate on small data")
     args = parser.parse_args()
 
     ######################################
@@ -41,18 +77,62 @@ def main():
     data_root = args.root = f"{args.root}/SSLAD-2D/labeled"
 
     epochs = 10
-    batch_size = 1
+    batch_size = 8
+    num_classes = 7
 
-    # Setup model, optimizer and dummy criterion
-    model = torchvision.models.detection.fasterrcnn_resnet50_fpn(pretrained=True)
-    in_features = model.roi_heads.box_predictor.cls_score.in_features
-    model.roi_heads.box_predictor = FastRCNNPredictor(in_features, 7)
+    # 1. Start a W&B run
+    wandb.init(project='iccv', entity='ma7583')
 
-    optimizer = torch.optim.SGD(model.parameters(), lr=0.001, momentum=0.9, weight_decay=0.0005)
-    lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=3, gamma=0.1)
+
+    from frcnn.initialize import get_fpn_mod2, get_fpn, get_fpn_mod
+    model = get_fpn(num_classes)
+
+    model = increase_minsize(model)
+
+    #so add another plugin after that
+    # optimizer.step()
+    # if warm_lr_scheduler is not None:
+    #     warm_lr_scheduler.step()
+
+    # if args.test_only: #should we do this the first paper suggested to do this
+    #     model = different_test_mode(model)
+
+    # choose some metrics and evaluation method
+    interactive_logger = InteractiveLogger()
+
+    # eval_plugin = EvaluationPlugin(
+    #     accuracy_metrics(
+    #         minibatch=True, epoch=True, experience=True, stream=True),
+    #     loss_metrics(minibatch=True, epoch=True, experience=True, stream=True),
+    #     forgetting_metrics(experience=True),
+    #     loggers=[interactive_logger])
+
+    # construct an optimizer
+    params = [p for p in model.parameters() if p.requires_grad]
+    optimizer = torch.optim.SGD(params, lr=0.001, momentum=0.9, weight_decay=0.00005, nesterov=True)
+    lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=6, gamma=0.1)
     lr_scheduler_plugin = LRSchedulerPlugin(lr_scheduler)
+    if args.fake:
+        args.mem_size = 10
+    else:
+        args.mem_size = 83  # 83 x 3 = 249
 
-    plugins = [DetectionStrategyPlugin(), lr_scheduler_plugin]
+
+    # warmup_factor = 1. / 1000
+    # # warmup_iters = min(1000, len(data_loader) - 1)
+    # warmup_iters = 50 #chose here what is good
+    # warm_lr_scheduler = warmup_lr_scheduler(optimizer, warmup_iters, warmup_factor)
+    # warm_scheduler_plugin = LRSchedulerPlugin(warm_lr_scheduler)
+
+    # replay_plugin = ReplayPlugin(mem_size)
+    # plugins = [DetectionStrategyPlugin(), lr_scheduler_plugin, replay_plugin]
+    plugins = [DetectionStrategyPlugin(args.mem_size, wandb), lr_scheduler_plugin]
+    # plugins = [DetectionStrategyPlugin(args.mem_size), lr_scheduler_plugin, warm_scheduler_plugin]
+    print('Arguments')
+    printargs = vars(args)
+    for arg in printargs.keys():
+        line = '%20s : %20s' % (arg, printargs[arg])
+        print(line)
 
     ######################################
     #                                    #
@@ -63,8 +143,11 @@ def main():
     if args.load_model is not None:
         model.load_state_dict(torch.load(f"./{args.load_model}"))
 
-    # Setup Benchmark
-    train_datasets, val_datasets = create_train_val_set(data_root, validation_proportion=0.1)
+    if args.fake:
+        train_datasets, val_datasets = create_train_val_set_small(data_root, validation_proportion=0.1)
+    else:
+        # Setup Benchmark
+        train_datasets, val_datasets = create_train_val_set(data_root, validation_proportion=0.1)
 
     if args.test:
         eval_datasets, _ = create_test_set_from_json(data_root)
@@ -79,7 +162,12 @@ def main():
     result_file = open(f"./{args.name}_{test_split}.txt", "w")
     logger = TextLogger(result_file)
     gt_path = f"{args.root}/annotations/instance_{test_split}.json"
-    store = None if not args.store else f"{args.name}_{test_split}"
+    # change this a little here
+    if not args.store:
+        store = None
+    else:
+        os.makedirs(args.name, exist_ok=True)
+        store = os.path.join(args.name, f"result_{test_split}")
     eval_plugin = EvaluationPlugin(detection_metrics(gt_path, experience=True, store=store, pred_only=args.test),
                                    loggers=logger)
 
@@ -97,6 +185,9 @@ def main():
     else:
         for train_exp in benchmark.train_stream:
             strategy.train(train_exp, num_workers=args.num_workers)
+
+        # #add different model here
+        # model = different_test_mode(model)
 
         # Only evaluate at the end of training
         results = strategy.eval(benchmark.test_stream, num_workers=args.num_workers)
