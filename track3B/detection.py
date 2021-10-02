@@ -83,7 +83,6 @@ def main():
     # 1. Start a W&B run
     wandb.init(project='iccv', entity='ma7583')
 
-
     from frcnn.initialize import get_fpn_mod2, get_fpn, get_fpn_mod
     model = get_fpn(num_classes)
 
