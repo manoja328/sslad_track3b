@@ -27,6 +27,7 @@ from torchvision.models.detection.transform import GeneralizedRCNNTransform
 # Flexible integration for any Python script
 import wandb
 
+
 def increase_minsize(model):
     image_mean = [0.485, 0.456, 0.406]
     image_std = [0.229, 0.224, 0.225]
@@ -79,16 +80,22 @@ def main():
     epochs = 10
     batch_size = 8
     num_classes = 7
+    if args.test_only:  # if testing only
+        batch_size = 16
 
-    # 1. Start a W&B run
-    wandb.init(project='iccv', entity='ma7583')
-
-    from frcnn.initialize import get_fpn_mod2, get_fpn, get_fpn_mod
-    model = get_fpn(num_classes)
+    from frcnn.initialize import get_fpn_mod2, get_fpn, get_fpn_mod, get_res101_FRCNN, \
+        get_fpn_frozen, get_fpn_doublehead, get_fpn_thresh, get_fpn_anchor, get_fpn_temperature, get_fpn_scale, get_fpn_scale2
+    # model = get_fpn_scale(num_classes)
+    model = get_fpn_scale2(num_classes)
+    # model = get_fpn_doublehead(num_classes)
+    # model = get_fpn_temperature(num_classes)
+    # model = get_fpn(num_classes)
+    # model = get_fpn_frozen(num_classes)
+    # model = get_res101_FRCNN(num_classes)
 
     model = increase_minsize(model)
 
-    #so add another plugin after that
+    # so add another plugin after that
     # optimizer.step()
     # if warm_lr_scheduler is not None:
     #     warm_lr_scheduler.step()
@@ -108,14 +115,14 @@ def main():
 
     # construct an optimizer
     params = [p for p in model.parameters() if p.requires_grad]
-    optimizer = torch.optim.SGD(params, lr=0.001, momentum=0.9, weight_decay=0.00005, nesterov=True)
+    # optimizer = torch.optim.SGD(params, lr=0.02, momentum=0.9, weight_decay=0.00005, nesterov=True)
+    optimizer = torch.optim.SGD(params, lr=0.01, momentum=0.9, nesterov=True)
     lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=6, gamma=0.1)
     lr_scheduler_plugin = LRSchedulerPlugin(lr_scheduler)
     if args.fake:
         args.mem_size = 10
     else:
         args.mem_size = 83  # 83 x 3 = 249
-
 
     # warmup_factor = 1. / 1000
     # # warmup_iters = min(1000, len(data_loader) - 1)
@@ -132,6 +139,9 @@ def main():
     for arg in printargs.keys():
         line = '%20s : %20s' % (arg, printargs[arg])
         print(line)
+
+    # 1. Start a W&B run
+    wandb.init(project='iccv', entity='ma7583')
 
     ######################################
     #                                    #
@@ -184,9 +194,6 @@ def main():
     else:
         for train_exp in benchmark.train_stream:
             strategy.train(train_exp, num_workers=args.num_workers)
-
-        # #add different model here
-        # model = different_test_mode(model)
 
         # Only evaluate at the end of training
         results = strategy.eval(benchmark.test_stream, num_workers=args.num_workers)

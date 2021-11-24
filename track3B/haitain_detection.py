@@ -1,5 +1,6 @@
 import random
 
+import ipdb
 import torch
 import torch.utils.data
 from typing import Callable, List, Any, Dict, Tuple, Union, Optional
@@ -320,9 +321,16 @@ class ToTensor(object):
         image = torchvision.transforms.functional.to_tensor(image)
         return image, target
 
+from auto_augment import equalize
+class Equalize(object):
+    def __call__(self, image, target):
+        image = equalize(image, 1)
+        return image, target
+
 
 def get_transform(train):
     transform_arr = [ToTensor()]
+    # transform_arr = [Equalize(), ToTensor()]
     if train:
         transform_arr.append(RandomHorizontalFlip(0.5))
     return Compose(transform_arr)
